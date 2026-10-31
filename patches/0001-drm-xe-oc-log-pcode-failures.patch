@@ -1,0 +1,73 @@
+From: synman <1299716+synman@users.noreply.github.com>
+Subject: [PATCH 1/2] drm/xe/oc: log PCODE mailbox failures and stop faking a mem_speed read
+
+Applies on top of exzile/intel-arc-pro-fan-control's xe_gt_oc.c (commit
+0fc18ceefbc5b6ff341926745f95f7c47058a741) on the Debian 7.2.9 xe tree.
+
+- xe_pcode.c: print the raw PCODE status beside the decoded error, so a
+  failed mailbox call says which status the firmware returned.
+- vf_curve end: warn when the finalize call fails. The return path is
+  unchanged.
+- mem_speed read: PCODE answers -EPROTO until a rate has been staged
+  since boot. Return that error instead of reporting a guessed stock
+  rate, so userspace can tell "unknown" from "19000".
+- mem_speed commit: log every commit result and return its error, so a
+  rejected write is visible in dmesg and to the writer.
+
+Seen on an Arc Pro B70 (8086:e223, subsystem 1849:6025): with nothing
+staged, every boot logs "PCODE Mailbox failed: -71 Unknown (status 0x8)"
+once per mem_speed read. That line is expected.
+---
+--- a/drivers/gpu/drm/xe/xe_gt_oc.c
++++ b/drivers/gpu/drm/xe/xe_gt_oc.c
+@@ -168,7 +168,10 @@
+ 			return ret;
+ 	}
+ 
+-	xe_pcode_read(tile, OC_MBOX_END, &end0, &end1);
++	ret = xe_pcode_read(tile, OC_MBOX_END, &end0, &end1);
++	if (ret)
++		drm_warn(&xe->drm, "oc: vf_curve end ret=%d data0=%#x data1=%#x\n",
++			 ret, end0, end1);
+ 
+ 	return count;
+ }
+@@ -184,10 +187,10 @@
+ 	guard(xe_pm_runtime)(xe);
+ 
+ 	/* p1=5 read returns -EPROTO until a value has been staged (fresh boot =
+-	 * hardware default); report the stock speed in that case. */
++	 * hardware default); return that error so the caller sees nothing is staged. */
+ 	ret = xe_pcode_read(tile, OC_MBOX_MEM_READ, &mbps, &hi);
+ 	if (ret)
+-		mbps = OC_MEM_STOCK_MBPS;
++		return ret;
+ 
+ 	return sysfs_emit(buf, "%u\n", mbps);
+ }
+@@ -211,7 +214,11 @@
+ 	ret = xe_pcode_write64_timeout(tile, OC_MBOX_MEM_SET, mbps, 0, 1);
+ 	if (ret)
+ 		return ret;
+-	xe_pcode_read(tile, OC_MBOX_MEM_COMMIT, &c0, &c1);   /* commit / finalize */
++	ret = xe_pcode_read(tile, OC_MBOX_MEM_COMMIT, &c0, &c1);   /* commit / finalize */
++	drm_info(&xe->drm, "oc: mem_speed %u commit ret=%d data0=%#x data1=%#x\n",
++		 mbps, ret, c0, c1);
++	if (ret)
++		return ret;
+ 
+ 	return count;
+ }
+--- a/drivers/gpu/drm/xe/xe_pcode.c
++++ b/drivers/gpu/drm/xe/xe_pcode.c
+@@ -57,8 +57,8 @@
+ 	}
+ 
+ 	if (err) {
+-		drm_err(&tile_to_xe(tile)->drm, "PCODE Mailbox failed: %d %s",
+-			err_decode, err_str);
++		drm_err(&tile_to_xe(tile)->drm, "PCODE Mailbox failed: %d %s (status %#x)",
++			err_decode, err_str, err);
+ 
+ 		return err_decode;
+ 	}

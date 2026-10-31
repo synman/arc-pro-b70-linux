@@ -1,0 +1,150 @@
+From: synman <1299716+synman@users.noreply.github.com>
+Subject: [PATCH 2/2] drm/xe/oc: expose the VRAM clock as hwmon "xe_oc" and cap mem_speed at 21500
+
+Applies after patch 1.
+
+- Cache the VRAM data rate on struct xe_device (oc_mem_mbps). The cache
+  is seeded once at probe by one PCODE read, refreshed by every
+  successful mem_speed read, and set by every committed mem_speed write.
+  At probe, -EPROTO (nothing staged since boot) seeds the stock 19000.
+- Register a second hwmon device named "xe_oc" under the PCI device with
+  freq1_input (Hz, the data rate / 8, so 21000 Mbps reads 2625000000)
+  and freq1_label "mclk", the amdgpu convention monitoring tools already
+  understand. Reading it costs no PCODE mailbox command, so a monitor can
+  poll it every update. The kernel has no hwmon "freq" channel type, so
+  these are plain device attributes, as amdgpu does it.
+- Lower OC_MEM_MAX_MBPS from 24000 to 21500. On this card 19000 to 21500
+  passed memtest_vulkan, a coherence check and an LLM bench. 22000 killed
+  GT0 and locked the whole host. The cap makes the driver refuse it.
+
+Note: the card now has two hwmon dirs, "xe" and "xe_oc". Tools must pick
+the hwmon by name; taking the first hwmon* dir can land on xe_oc.
+---
+--- a/drivers/gpu/drm/xe/xe_device_types.h
++++ b/drivers/gpu/drm/xe/xe_device_types.h
+@@ -465,6 +465,9 @@
+ 	/** @hwmon: hwmon subsystem integration */
+ 	struct xe_hwmon *hwmon;
+ 
++	/** @oc_mem_mbps: VRAM data rate in Mbps last read or committed by xe_gt_oc; 0 when unknown */
++	u32 oc_mem_mbps;
++
+ 	/** @heci_gsc: graphics security controller */
+ 	struct xe_heci_gsc heci_gsc;
+ 
+Binary files a/xe_gen_wa_oob and b/xe_gen_wa_oob differ
+--- a/drivers/gpu/drm/xe/xe_gt_oc.c
++++ b/drivers/gpu/drm/xe/xe_gt_oc.c
+@@ -26,7 +26,13 @@
+  *   GDDR6 memory data rate in Mbps (e.g. 19000 = 19 Gbps). Set via PCODE
+  *   LATE_BINDING domain 0x17: write (0x5e,6,0x17) d0=Mbps then commit
+  *   (0x5e,8,0x17); read (0x5e,5,0x17). Clamped to [OC_MEM_MIN_MBPS,
+- *   OC_MEM_MAX_MBPS]. Reads report the stock speed until a value is staged.
++ *   OC_MEM_MAX_MBPS]. A read fails with -EPROTO until a value is staged.
++ *
++ * hwmon: a separate hwmon device named "xe_oc" under the PCI device
++ *   freq1_input  VRAM clock in Hz, the data rate / 8 (19000 Mbps -> 2375000000)
++ *   freq1_label  "mclk", the amdgpu convention monitoring tools already read
++ *   It reports the rate cached at probe and on every committed write, so a
++ *   read costs no PCODE mailbox command.
+  *
+  * sysfs: <device>/tile#/gt#/oc/temp_limit  (read/write)
+  *   GPU thermal-throttle target in degrees C. Same LATE_BINDING mechanism,
+@@ -34,6 +40,7 @@
+  */
+ 
+ #include <linux/cleanup.h>
++#include <linux/hwmon.h>
+ #include <linux/kobject.h>
+ #include <linux/sysfs.h>
+ 
+@@ -66,7 +73,7 @@
+ #define OC_MBOX_MEM_SET		PCODE_MBOX(0x5e, 0x6, OC_MEM_DOMAIN)
+ #define OC_MBOX_MEM_COMMIT	PCODE_MBOX(0x5e, 0x8, OC_MEM_DOMAIN)
+ #define OC_MEM_MIN_MBPS		14000
+-#define OC_MEM_MAX_MBPS		24000
++#define OC_MEM_MAX_MBPS		21500	/* highest passing rate; 22000 killed GT0 and locked the host */
+ #define OC_MEM_STOCK_MBPS	19000	/* B60/B70 GDDR6 default (2375 MHz x8); reported before anything is staged */
+ 
+ /* GPU temperature limit (thermal throttle target), in degrees C, via
+@@ -192,6 +199,7 @@
+ 	if (ret)
+ 		return ret;
+ 
++	WRITE_ONCE(xe->oc_mem_mbps, mbps);
+ 	return sysfs_emit(buf, "%u\n", mbps);
+ }
+ 
+@@ -220,6 +228,7 @@
+ 	if (ret)
+ 		return ret;
+ 
++	WRITE_ONCE(xe->oc_mem_mbps, mbps);
+ 	return count;
+ }
+ 
+@@ -264,6 +273,34 @@
+ 	return count;
+ }
+ 
++static ssize_t freq1_input_show(struct device *dev, struct device_attribute *attr,
++				 char *buf)
++{
++	struct xe_device *xe = dev_get_drvdata(dev);
++	u32 mbps = READ_ONCE(xe->oc_mem_mbps);
++
++	if (!mbps)
++		return -ENODATA;
++
++	return sysfs_emit(buf, "%llu\n", (u64)mbps * 1000000ULL / 8);
++}
++
++static ssize_t freq1_label_show(struct device *dev, struct device_attribute *attr,
++				 char *buf)
++{
++	return sysfs_emit(buf, "mclk\n");
++}
++
++static DEVICE_ATTR_RO(freq1_input);
++static DEVICE_ATTR_RO(freq1_label);
++
++static struct attribute *oc_hwmon_attrs[] = {
++	&dev_attr_freq1_input.attr,
++	&dev_attr_freq1_label.attr,
++	NULL,
++};
++ATTRIBUTE_GROUPS(oc_hwmon);
++
+ static struct kobj_attribute attr_vf_curve = __ATTR_RW(vf_curve);
+ static struct kobj_attribute attr_mem_speed = __ATTR_RW(mem_speed);
+ static struct kobj_attribute attr_temp_limit = __ATTR_RW(temp_limit);
+@@ -294,6 +331,8 @@
+ {
+ 	struct xe_device *xe = gt_to_xe(gt);
+ 	struct kobject *oc;
++	struct device *hw;
++	u32 mbps = 0, hi = 0;
+ 	int err;
+ 
+ 	if (xe->info.skip_pcode)
+@@ -302,6 +341,20 @@
+ 	if (gt != xe_device_get_root_tile(xe)->primary_gt)
+ 		return 0;
+ 
++	/* Seed the cache with one PCODE read. -EPROTO means nothing was staged
++	 * since boot, so the card runs its stock rate; any other error leaves
++	 * the rate unknown until a read or write succeeds. */
++	err = xe_pcode_read(xe_device_get_root_tile(xe), OC_MBOX_MEM_READ, &mbps, &hi);
++	if (!err)
++		xe->oc_mem_mbps = mbps;
++	else if (err == -EPROTO)
++		xe->oc_mem_mbps = OC_MEM_STOCK_MBPS;
++
++	hw = devm_hwmon_device_register_with_groups(xe->drm.dev, "xe_oc", xe,
++						    oc_hwmon_groups);
++	if (IS_ERR(hw))
++		drm_warn(&xe->drm, "oc: xe_oc hwmon not registered: %pe\n", hw);
++
+ 	oc = kobject_create_and_add("oc", gt->sysfs);
+ 	if (!oc)
+ 		return -ENOMEM;

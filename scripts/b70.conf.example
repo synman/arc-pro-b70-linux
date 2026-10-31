@@ -1,0 +1,38 @@
+# b70 configuration, read by load-xe.sh and b70-tune.sh. Copy to /etc/b70/b70.conf and edit.
+# The tuning values ship EMPTY, which leaves the card at stock. The reference card's values are in the comments.
+# Every tuning value is hardware-specific: measure your own card, one setting at a time, before keeping any.
+
+# The card's PCI address (lspci -D -d 8086:e223).
+PCI=                        # e.g. 0000:89:00.0
+
+# The signed patched module, kept outside /lib/modules so a reboot always brings stock xe back.
+MODULE=/opt/b70/xe.ko
+# sha256 of that signed file. load-xe.sh refuses any other file.
+MODULE_SHA=
+# The certificate name modinfo reports as the signer.
+SIGNER="DKMS module signing key"
+
+# Everything that holds the card open. load-xe.sh and the mem_speed write stop these first, then start them again.
+STOP_CONTAINERS=""          # docker container names, space separated
+STOP_SERVICES=""            # systemd units, space separated
+HEALTH_CONTAINER=""         # optional: wait for this container's healthcheck after the restart
+KILL_COMMS="btop"           # processes still holding the card, killed by name (e.g. a btop reading xe PMU counters)
+
+LOG=/var/log/b70.log
+
+# Tuning, applied by b70-tune.sh. Leave a value empty to skip that setting.
+CLOCK_PIN_MHZ=              # GT0 min = max. Reference: 2800. Stock min is 1200.
+D3COLD_THRESHOLD=           # vram_d3cold_threshold. Reference: 0. Stock 300.
+# Runtime PM forced on for the card and every bridge above it (the dock's bridges on an eGPU).
+# Reference: "0000:89:00.0 0000:88:01.0 0000:87:00.0 0000:86:00.0 0000:85:00.0"
+RPM_DEVICES=""
+# Fan table, ten points of package °C:pwm (0-255).
+# Reference: "35:51 48:64 52:102 55:153 58:204 61:240 62:255 63:255 64:255 65:255"
+FAN_TABLE=""
+# VRAM data rate in Mbps. Stock 19000. The patched driver refuses anything above 21500.
+# On the reference card 19000-21500 passed; 22000 killed GT0 and locked the host.
+MEM_MBPS=                   # Reference: 21000. Run a full-VRAM test before keeping any rate.
+
+# Optional check after tuning: a command whose first line must contain COHERENCE_EXPECT.
+COHERENCE_CMD=""
+COHERENCE_EXPECT=""

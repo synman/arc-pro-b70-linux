@@ -1,0 +1,21 @@
+# Load the patched xe and apply b70.conf at every boot. Any failure leaves stock xe, which is the safe fallback:
+# load-xe.sh refuses a sha, signer or vermagic mismatch and a wedged card, and a failed load stops the unit
+# before the tuning step. Install: copy the repo to /opt/b70, then
+#   systemctl enable --now b70-preferred.service
+# Undo: systemctl disable b70-preferred.service, then reboot.
+# After a Thunderbolt hot-replug of the dock without a reboot: systemctl restart b70-preferred.service
+[Unit]
+Description=Intel Arc Pro B70: patched xe and preferred tuning
+Wants=docker.service
+After=docker.service network-online.target
+RequiresMountsFor=/opt/b70
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash /opt/b70/scripts/load-xe.sh /etc/b70/b70.conf
+ExecStart=/bin/bash /opt/b70/scripts/b70-tune.sh /etc/b70/b70.conf
+TimeoutStartSec=900
+
+[Install]
+WantedBy=multi-user.target
