@@ -33,8 +33,8 @@ a starting point to re-measure, never as a safe value.
 | Runtime PM on for the card and the dock bridges | Within noise. It avoids wake latency |
 | `power1_cap` 290 W | The firmware clamps it to 275 W. Read back after every write |
 | `power_profile` | Only `base` and `power_saving` exist, and `base` is the top |
-| VF curve −25 mV | Applied cleanly (the VF write path works on 1849:6025). Not kept |
-| Fan table | The firmware default is loud at idle. The example table is quiet at about 47 °C idle and about 80% at a 270 W memtest load |
+| VF curve −25 mV | Applied cleanly, so the VF write path works on 1849:6025. Same tok/s, about 5% fewer watts, cooler. Not kept |
+| Fan table (reference values in `b70.conf.example`) | Measured with that table: about 1280 rpm at 47 °C package at idle, and about 80% duty at the ~270 W memtest load |
 
 ## Driver and build traps
 
