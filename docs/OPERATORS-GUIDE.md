@@ -103,6 +103,17 @@ systemctl status b70-preferred.service; tail -40 /var/log/b70.log
 - Expect about two minutes of GPU downtime per boot while the swap runs.
 - After a dock hot-replug without a reboot, run `systemctl restart b70-preferred.service`.
 - After a kernel update, the vermagic check makes the load `ABORTED`, and the boot runs on stock xe. Rebuild and re-sign (steps 2 and 3), then update `MODULE_SHA`.
+- Better: build for the new kernel before you reboot into it, so the first boot already loads the patched xe. Install the new kernel and its headers first, then name both versions:
+
+  ```bash
+  apt install -t trixie-backports linux-image-amd64 linux-headers-<new-release>   # e.g. 7.2.11+deb13-amd64
+  KREL=<new-release> DEBVER=<new-debian-version> ./build/build-xe.sh               # e.g. DEBVER=7.2.11-1~bpo13+1
+  ./build/sign-xe.sh work/out/xe.ko /var/lib/dkms/mok.key /var/lib/dkms/mok.pub
+  install -m 644 work/out/xe.ko /opt/b70/xe.ko                                      # then set MODULE_SHA, then reboot
+  ```
+
+  `DEBVER` is the package version `apt-cache policy linux-image-<new-release>` shows. Until the reboot, the running kernel's load will refuse the new module on vermagic, so do not restart the unit in between.
+- Check every other out-of-tree module before a kernel jump. DKMS rebuilds packaged ones automatically, but a hand-built module, such as a patched GPU driver of any vendor, stays tied to the old kernel and silently falls back to stock.
 
 ## 8. Roll back
 
