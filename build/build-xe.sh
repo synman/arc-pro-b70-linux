@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build a patched xe.ko for the RUNNING Debian kernel, inside a throwaway container.
 #
-#   sudo ./build/build-xe.sh [workdir]        default workdir: ./work
+#   sudo ./build/build-xe.sh [workdir]        default workdir: ./work (KREL, DEBVER: see below)
 #
 # What goes in, in order:
 #   1. the Debian linux-source package whose version matches the running kernel (from `uname -v`)
@@ -18,8 +18,10 @@ WORK=$(mkdir -p "${1:-$REPO/work}" && cd "${1:-$REPO/work}" && pwd -P)
 EXZ_COMMIT=${EXZ_COMMIT:-0fc18ceefbc5b6ff341926745f95f7c47058a741}
 IMAGE=${IMAGE:-debian:trixie-backports}
 
-KREL=$(uname -r)
-DEBVER=$(uname -v | sed -n 's/.*Debian \([^ ]*\) .*/\1/p')
+# Build for an installed kernel you have not booted yet (before a kernel upgrade reboot) by setting both:
+#   KREL=7.2.11+deb13-amd64 DEBVER=7.2.11-1~bpo13+1 ./build/build-xe.sh
+KREL=${KREL:-$(uname -r)}
+DEBVER=${DEBVER:-$(uname -v | sed -n 's/.*Debian \([^ ]*\) .*/\1/p')}
 SERIES=$(echo "$KREL" | cut -d. -f1,2)
 HDR=/usr/src/linux-headers-$KREL
 [ -n "$DEBVER" ] || { echo "cannot read the Debian kernel version from: $(uname -v)"; exit 1; }
